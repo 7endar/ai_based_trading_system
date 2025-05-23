@@ -3,42 +3,41 @@ warnings.filterwarnings("ignore")  # avoid printing out absolute paths
 
 import pandas as pd
 import numpy as np
-import ccxt
-import ta  # pip install ta
-from datetime import datetime
 import sqlite3
 from sklearn.preprocessing import MinMaxScaler
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+
 import torch
 from torch.utils.data import Dataset, DataLoader
-
 import torch.nn as nn
-import torch.nn.functional as F
+import numpy as np
 
-conn = sqlite3.connect("btc_dataset.db")  # Dosya adını seninkine göre değiştir
+# --- VERİ YÜKLEME & ÖN İŞLEME ---
+
+conn = sqlite3.connect("btc_dataset.db")  # Kendi dosya adını kullan
 
 price_df = pd.read_sql_query("SELECT * FROM ohlcv_1h", conn)
 indicators_df = pd.read_sql_query("SELECT * FROM indicators_1h", conn)
 
-# Merge işlemi
 df = pd.merge(indicators_df, price_df, on='timestamp', how='inner')
 df = df.sort_values("timestamp").reset_index(drop=True)
 
-# Feature listesi
 features = ['rsi', 'macd', 'macd_signal', 'macd_hist',
             'bb_upper', 'bb_middle', 'bb_lower',
             'atr', 'obv', 'ema',
             'open', 'high', 'low', 'close', 'volume']
 
-# Eksik verileri temizle
 df.dropna(inplace=True)
 
-# Normalize et
 scaler = MinMaxScaler()
 df[features] = scaler.fit_transform(df[features])
 
-SEQ_LEN = 500  # 60 saatlik geçmişe bak
-PRED_OFFSET = 24  # 1 saat sonrası hedef
+SEQ_LEN = 500  # geçmiş veri uzunluğu
+PRED_OFFSET = 24  # 24 saat sonrası hedef
 
+
+# --- DATASET TANIMI ---
 
 class CryptoDataset(Dataset):
     def __init__(self, df, features):
@@ -46,7 +45,7 @@ class CryptoDataset(Dataset):
         self.labels = df['close'].values.astype(np.float32)
 
     def __len__(self):
-        return max(0, len(self.data) - SEQ_LEN - 24)  # max offset 24 saat
+        return max(0, len(self.data) - SEQ_LEN - PRED_OFFSET)
 
     def __getitem__(self, idx):
         x = self.data[idx:idx + SEQ_LEN]
@@ -57,8 +56,7 @@ class CryptoDataset(Dataset):
         return torch.tensor(x), torch.tensor(y)
 
 
-dataset = CryptoDataset(df, features)
-train_loader = DataLoader(dataset, batch_size=32, shuffle=True)
+# --- MODEL TANIMI ---
 
 class PositionalEncoding(nn.Module):
     def __init__(self, d_model, max_len=5000):
@@ -91,39 +89,31 @@ class TransformerRegressor(nn.Module):
         x = self.transformer(x)
         x = x[-1]  # last timestep output
         return self.regressor(x)  # -> (B, 3)
-    
-    
-def multi_horizon_predict(model, df, features, scaler, seq_len):
-    model.eval()
-    window = df[features].values[-seq_len:].astype(np.float32)
-    x = torch.tensor(window).unsqueeze(0).to(device)  # (1, seq_len, features)
-
-    with torch.no_grad():
-        y_pred_norm = model(x).cpu().numpy().flatten()
-
-    # Ters ölçekleme
-    dummy = np.zeros((1, len(features)))
-    preds = {}
-    for i, (label, norm_val) in enumerate(zip(["1h", "4h", "24h"], y_pred_norm)):
-        dummy[0, features.index("close")] = norm_val
-        preds[label] = scaler.inverse_transform(dummy)[0, features.index("close")]
-
-    # Mevcut fiyatı da göster
-    latest_close_scaled = df['close'].values[-1]
-    dummy[0, features.index("close")] = latest_close_scaled
-    preds["current"] = scaler.inverse_transform(dummy)[0, features.index("close")]
-    return preds
 
 
+# --- TRAIN / TEST VERİLERİ BÖLME ---
 
-# Model, loss ve optimizer
+train_df, test_df = train_test_split(df, test_size=0.2, shuffle=False)
+
+train_dataset = CryptoDataset(train_df, features)
+test_dataset = CryptoDataset(test_df, features)
+
+train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
+test_loader = DataLoader(test_dataset, batch_size=32, shuffle=False)
+
+
+# --- CİHAZ & MODEL HAZIRLIK ---
+
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 model = TransformerRegressor(num_features=len(features)).to(device)
 criterion = nn.MSELoss()
 optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 
-# Eğitim döngüsü
-for epoch in range(10):
+
+# --- EĞİTİM DÖNGÜSÜ ---
+
+EPOCHS = 10
+for epoch in range(EPOCHS):
     model.train()
     epoch_loss = 0
     for x, y in train_loader:
@@ -134,13 +124,75 @@ for epoch in range(10):
         loss.backward()
         optimizer.step()
         epoch_loss += loss.item()
-    print(f"Epoch {epoch+1}: Loss = {epoch_loss:.4f}")
+    print(f"Epoch {epoch+1}/{EPOCHS} - Train Loss: {epoch_loss/len(train_loader):.6f}")
 
-preds = multi_horizon_predict(model, df, features, scaler, SEQ_LEN)
 
-print(f"Aktüel fiyat  : ${preds['current']:.4f}")
-print("--- Tahminler ---")
-print(f"1 saat sonra  : ${preds['1h']:.4f}")
-print(f"4 saat sonra  : ${preds['4h']:.4f}")
-print(f"24 saat sonra : ${preds['24h']:.4f}")
+# --- TEST VE PERFORMANS DEĞERLENDİRME ---
 
+model.eval()
+all_preds = []
+all_targets = []
+
+with torch.no_grad():
+    for x, y in test_loader:
+        x, y = x.to(device), y.to(device)
+        preds = model(x)
+        all_preds.append(preds.cpu().numpy())
+        all_targets.append(y.cpu().numpy())
+
+all_preds = np.concatenate(all_preds, axis=0)
+all_targets = np.concatenate(all_targets, axis=0)
+
+# Metrik hesaplama (her hedef için)
+for i, label in enumerate(["1h", "4h", "24h"]):
+    mse = mean_squared_error(all_targets[:, i], all_preds[:, i])
+    rmse = np.sqrt(mse)
+    mae = mean_absolute_error(all_targets[:, i], all_preds[:, i])
+    r2 = r2_score(all_targets[:, i], all_preds[:, i])
+    print(f"\nPerformance on {label} prediction:")
+    print(f"  MSE: {mse:.6f}")
+    print(f"  RMSE: {rmse:.6f}")
+    print(f"  MAE: {mae:.6f}")
+    print(f"  R2: {r2:.6f}")
+
+
+# --- MODEL KAYDETME ---
+
+torch.save(model.state_dict(), "transformer_regressor.pth")
+print("\nModel 'transformer_regressor.pth' olarak kaydedildi.")
+
+
+# --- TEK SEFERLİK TAHMİN FONKSİYONU ---
+
+def multi_horizon_predict(model, df, features, scaler, seq_len):
+    model.eval()
+    window = df[features].values[-seq_len:].astype(np.float32)
+    x = torch.tensor(window).unsqueeze(0).to(device)  # (1, seq_len, features)
+
+    with torch.no_grad():
+        y_pred_norm = model(x).cpu().numpy().flatten()
+
+    dummy = np.zeros((1, len(features)))
+    preds = {}
+    for i, (label, norm_val) in enumerate(zip(["1h", "4h", "24h"], y_pred_norm)):
+        dummy[0, features.index("close")] = norm_val
+        preds[label] = scaler.inverse_transform(dummy)[0, features.index("close")]
+
+    latest_close_scaled = df['close'].values[-1]
+    dummy[0, features.index("close")] = latest_close_scaled
+    preds["current"] = scaler.inverse_transform(dummy)[0, features.index("close")]
+    return preds
+
+
+# --- KAYDEDİLEN MODEL İLE ÖRNEK TAHMİN ---
+
+# Yeni model nesnesi oluştur ve ağırlıkları yükle
+loaded_model = TransformerRegressor(num_features=len(features)).to(device)
+loaded_model.load_state_dict(torch.load("transformer_regressor.pth", map_location=device))
+
+preds = multi_horizon_predict(loaded_model, df, features, scaler, SEQ_LEN)
+
+print(f"\nSon fiyat (current): ${preds['current']:.4f}")
+print(f"1 saat sonrası tahmin  : ${preds['1h']:.4f}")
+print(f"4 saat sonrası tahmin  : ${preds['4h']:.4f}")
+print(f"24 saat sonrası tahmin : ${preds['24h']:.4f}")
