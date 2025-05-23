@@ -191,6 +191,19 @@ for i, label in enumerate(PREDICTION_HORIZONS.keys()):
     print(f"  MAE: {mae:.6f}")
     print(f"  R2: {r2:.6f}")
 
+# --- MODEL KAYDETME --- (TEST'ten sonra ekleyin)
+model_path = "transformer_1h_model.pth"  # Model dosya adı
+torch.save({
+    'model_state_dict': model.state_dict(),
+    'scaler': scaler,
+    'features': features,
+    'seq_len': SEQ_LEN,
+    'prediction_horizons': PREDICTION_HORIZONS,
+    'epoch': EPOCHS,
+    'train_loss': train_losses[-1],
+    'val_loss': val_losses[-1]
+}, model_path)
+print(f"\nModel ve parametreler başarıyla kaydedildi: {model_path}")
 
 # --- TAHMİN FONKSİYONU (GÜNCELLENDİ) ---
 def multi_horizon_predict(model, df, features, scaler, seq_len):
