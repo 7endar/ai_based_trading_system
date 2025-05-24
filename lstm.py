@@ -36,7 +36,7 @@ close_idx = features.index('close')
 offsets = [1, 4, 24]  # saat cinsinden (veri 1 saatlik)
 
 X, y = [], []
-seq_len = 200
+seq_len = 500
 
 for i in range(seq_len, len(scaled_data) - max(offsets)):
     X.append(scaled_data[i - seq_len:i])
@@ -65,9 +65,9 @@ class MultiOutputLSTMModel(nn.Module):
     def __init__(self, input_size, hidden_size1=64, hidden_size2=32, output_size=3):
         super(MultiOutputLSTMModel, self).__init__()
         self.lstm1 = nn.LSTM(input_size, hidden_size1, batch_first=True)
-        self.dropout1 = nn.Dropout(0.2)
+        self.dropout1 = nn.Dropout(0.5)
         self.lstm2 = nn.LSTM(hidden_size1, hidden_size2, batch_first=True)
-        self.dropout2 = nn.Dropout(0.2)
+        self.dropout2 = nn.Dropout(0.5)
         self.fc = nn.Linear(hidden_size2, output_size)
 
     def forward(self, x):
@@ -81,7 +81,7 @@ class MultiOutputLSTMModel(nn.Module):
 
 model = MultiOutputLSTMModel(input_size=len(features)).to(device)
 criterion = nn.MSELoss()
-optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+optimizer = torch.optim.Adam(model.parameters(), lr=0.00001)
 
 # Eğitim (örnek 10 epoch)
 epochs = 10
