@@ -35,7 +35,7 @@ scaled_data = scaled_features  # eğitim için kullanacağın veri
 
 close_idx = features.index('close')
 
-# 3 farklı hedef: 1 saat, 4 saat, 24 saat sonrası close farkları
+# 3 farklı hedef: 5 dakika, 15 dakika, 1 saat sonrası close farkları
 offsets = [1, 3, 12]  # saat cinsinden (veri 1 saatlik)
 
 X, y = [], []
