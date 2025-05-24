@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 from sklearn.preprocessing import MinMaxScaler
 import sqlite3
-from sklearn.metrics import r2_score
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -13,6 +13,10 @@ conn = sqlite3.connect("btc_dataset.db")
 
 price_df = pd.read_sql_query("SELECT * FROM ohlcv_1h", conn)
 indicators_df = pd.read_sql_query("SELECT * FROM indicators_1h", conn)
+
+# Son 120 veriyi çıkar
+price_df = price_df[:-106]
+indicators_df = indicators_df[:-106]
 
 df = pd.merge(indicators_df, price_df, on='timestamp', how='inner')
 df = df.sort_values("timestamp").reset_index(drop=True)
@@ -118,6 +122,9 @@ for epoch in range(epochs):
 
     print(f"Epoch {epoch+1}/{epochs} - Train Loss: {avg_train_loss:.6f} - Validation Loss: {avg_val_loss:.6f}")
 
+# Modelin ağırlıklarını kaydet
+torch.save(model.state_dict(), "lstm1h.pth")
+
 # Eğitim sonrası son pencere için tahminler
 
 last_seq = scaled_data[-seq_len:]  # (seq_len, features)
@@ -173,14 +180,8 @@ for target_idx in range(len(offsets)):  # 0:1h, 1:4h, 2:24h
     predicted_prices_list.append(preds_for_target)
     real_prices_list.append(real_for_target)
 
-# R2 skorlarını hedef bazında hesapla
-from sklearn.metrics import r2_score
-
-for i, off in enumerate(offsets):
-    r2 = r2_score(real_prices_list[i], predicted_prices_list[i])
-    print(f"Validation R2 Score for {off} hour(s) ahead (scaled): {r2:.4f}")
-
-# İstersen inverse scale edip gerçek fiyatlara da dönebilirsin
+# Inverse scale edilmiş veride metrikler
+print("\n[Validation Metrics")
 for i, off in enumerate(offsets):
     dummy_pred = np.zeros((len(predicted_prices_list[i]), len(features)))
     dummy_pred[:, close_idx] = predicted_prices_list[i]
@@ -191,9 +192,7 @@ for i, off in enumerate(offsets):
     inv_real_prices = scaler.inverse_transform(dummy_real)[:, close_idx]
 
     r2_inv = r2_score(inv_real_prices, inv_pred_prices)
-    print(f"Validation R2 Score for {off} hour(s) ahead (inverse scaled): {r2_inv:.4f}")
+    mse_inv = mean_squared_error(inv_real_prices, inv_pred_prices)
+    mae_inv = mean_absolute_error(inv_real_prices, inv_pred_prices)
 
-# İstersen ilk 10 tahmin ve gerçek değerleri göster (inverse scaled)
-print("\nİlk 10 Validation Tahmini ve Gerçek Değerler (inverse scaled):")
-for i in range(10):
-    print(f"Gerçek 1h: {inv_real_prices[i]:.2f} - Tahmin 1h: {inv_pred_prices[i]:.2f}")
+    print(f"{off} saat sonrası - R2: {r2_inv:.4f}, MSE: {mse_inv:.6f}, MAE: {mae_inv:.6f}")
